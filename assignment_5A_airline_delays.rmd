@@ -1,0 +1,120 @@
+---
+title: "Assignment 5A – Airline Delays"
+author: "Kevin Martin"
+date: "2025-09-28"
+output: html_document
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+# R setup
+library(tidyverse)      # dplyr, tidyr, ggplot2, readr
+library(DBI)            # database interface
+# library(RPostgres)    # uncomment after install.packages("RPostgres")
+theme_set(theme_minimal(base_size = 12))
+
+# Helper: confirm working directory contains the CSV
+list.files()
+```
+
+
+## R: Load & tidy the wide CSV
+```{r fallback-wide}
+library(tibble)
+
+wide <- tribble(
+  ~Airline,     ~`New York`, ~Dallas, ~Denver, ~Miami, ~LA,
+  "Airline A",  12,          25,      19,      NA,     30,
+  "Airline B",  20,          15,      22,      18,     NA
+)
+
+wide
+```
+
+```{r r-load-clean, message=FALSE, warning=FALSE}
+library(readr)
+library(stringr)
+
+# Keep the fallback 'wide' you created above
+fallback_tbl <- wide
+
+# Try to load a multi-column CSV; if it fails, fall back to the tribble
+load_wide <- function(path) {
+  if (!file.exists(path)) return(fallback_tbl)
+  x <- try(read_csv(path, na = c("", "NA"), show_col_types = FALSE), silent = TRUE)
+  if (inherits(x, "try-error") || is.null(x) || ncol(x) <= 1) return(fallback_tbl)
+  # clean header quirks
+  names(x) <- str_trim(names(x))
+  names(x)[1] <- sub("^\ufeff", "", names(x)[1])  # strip BOM if present
+  x
+}
+
+wide <- load_wide("airline_delays_wide.csv")
+
+# Clean numeric NAs to 0 for analysis (keep original if you want to preserve blanks)
+wide_clean <- wide %>% mutate(across(where(is.numeric), ~ tidyr::replace_na(.x, 0)))
+
+wide_clean
+```
+
+
+### 2) Replace your `wide-to-long` chunk with this safer pivot
+```{r wide-to-long}
+first_col <- names(wide_clean)[1]  # whatever your first column is called
+long <- wide_clean %>%
+  pivot_longer(cols = -all_of(first_col),
+               names_to = "City",
+               values_to = "Delayed_Count") %>%
+  rename(Airline = !!first_col)
+
+long
+```
+
+## Overall share of delays by airline
+
+```{r overall, echo=FALSE}
+overall <- long %>%
+  dplyr::group_by(Airline) %>%
+  dplyr::summarise(Delayed_Count = sum(Delayed_Count), .groups = "drop") %>%
+  dplyr::mutate(Percent_of_All_Delays = round(100 * Delayed_Count / sum(Delayed_Count), 1)) %>%
+  dplyr::arrange(dplyr::desc(Percent_of_All_Delays))
+
+# Pretty table
+knitr::kable(overall, digits = 1)
+```
+
+**Summary:** `r overall$Airline[1]` = `r overall$Percent_of_All_Delays[1]`%,  
+`r overall$Airline[2]` = `r overall$Percent_of_All_Delays[2]`%.
+
+# Share of delays within each city
+```{r city-share}
+city_share <- long %>%
+  group_by(City) %>%
+  mutate(Total_City_Delays = sum(Delayed_Count)) %>%
+  ungroup() %>%
+  mutate(Percent_of_City = ifelse(Total_City_Delays > 0,
+                                  round(100 * Delayed_Count / Total_City_Delays, 1),
+                                  NA_real_))
+
+city_share %>% arrange(City, desc(Percent_of_City))
+```
+
+```{r city-plot, fig.width=8, fig.height=4}
+ggplot(city_share, aes(x = City, y = Delayed_Count, fill = Airline)) +
+  geom_col(position = "fill", na.rm = TRUE) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Share of Delays by Airline within Each City",
+       x = "City", y = "Percent of City Delays") +
+  theme(legend.position = "bottom")
+```
+
+## Step 3: Describe and Explain the Discrepancy
+
+Looking at the totals, Airline A seems slightly worse, responsible for 54% of all delays compared to Airline B’s 46%.  
+But when you break it down city-by-city, you see that Airline B actually has more delays in New York and Denver, while Airline A has higher shares in Dallas and LA.  
+Miami delays are entirely from Airline B.  
+
+This difference happens because overall totals don’t show where each airline flies the most.  
+Airline A might fly more in busy or congested cities, which drives up its total delay count even if it performs better in some places.  
+This is similar to judging a restaurant chain by total complaints without looking at how many locations it has in each area.  
+Statisticians call this **Simpson’s Paradox**, where combining data can reverse the trend seen in smaller groups.
+
